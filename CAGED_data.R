@@ -1,5 +1,5 @@
 download_caged <- function(ref = NULL,
-                           destino = "dados_caged") {
+                           destino = "dados_caged_raw") {
   
   suppressPackageStartupMessages({
     library(googledrive)
@@ -18,7 +18,7 @@ download_caged <- function(ref = NULL,
   cli::cli_h1("📥 Download CAGED (RAW)")
   
   # =========================
-  # 🔎 LISTAR ESTRUTURA DRIVE
+  # 🔎 LISTAR DRIVE
   # =========================
   
   anos <- drive_ls(as_id(root_id)) %>%
@@ -29,15 +29,12 @@ download_caged <- function(ref = NULL,
     meses <- drive_ls(anos$id[i]) %>%
       filter(!str_detect(name, "\\."))
     
-    tibble(
-      ym = meses$name,
-      id = meses$id
-    )
+    tibble(ym = meses$name, id = meses$id)
     
   }) %>% arrange(ym)
   
   # =========================
-  # 🎯 FILTRO (YYYY ou YYYYMM)
+  # 🎯 FILTRO
   # =========================
   
   if(!is.null(ref)){
@@ -49,62 +46,43 @@ download_caged <- function(ref = NULL,
       estrutura <- estrutura %>% filter(substr(ym,1,4) == ref)
       
     } else {
-      stop("Use formato YYYY ou YYYYMM")
+      stop("Use YYYY ou YYYYMM")
     }
   }
   
   if(nrow(estrutura) == 0){
-    cli::cli_alert_warning("Nenhum período encontrado.")
+    cli::cli_alert_warning("Nenhum período encontrado")
     return(invisible(NULL))
   }
   
   # =========================
-  # 📊 PROGRESS BAR (CORRETO)
+  # 📊 PROGRESS BAR CORRETO
   # =========================
   
   pb <- cli::cli_progress_bar(
     total = nrow(estrutura),
-    format = "Download [{bar}] {percent} | {current}/{total} | ETA: {eta}"
+    format = "Download [{bar}] {percent} | {current}/{total}"
   )
-  
-  # =========================
-  # 📥 FUNÇÃO DOWNLOAD
-  # =========================
   
   baixar_mes <- function(mes_id, ym){
     
     arq_dest <- file.path(destino, paste0("CAGED_", ym, ".xlsx"))
     
-    # 🔁 Skip se já existir
     if(file.exists(arq_dest)){
-      cli::cli_alert_info(paste("Já existe:", ym))
+      cli::cli_inform(paste("Já existe:", ym))
       return(arq_dest)
     }
     
-    arquivos <- tryCatch(
-      drive_ls(mes_id),
-      error = function(e) NULL
-    )
-    
-    if(is.null(arquivos)){
-      cli::cli_alert_danger(paste("Erro ao listar:", ym))
-      return(NULL)
-    }
+    arquivos <- tryCatch(drive_ls(mes_id), error = function(e) NULL)
+    if(is.null(arquivos)) return(NULL)
     
     arquivo <- arquivos %>%
       filter(str_detect(name, "\\.xlsx")) %>%
       slice(1)
     
-    if(nrow(arquivo) == 0){
-      cli::cli_alert_warning(paste("Sem XLSX:", ym))
-      return(NULL)
-    }
+    if(nrow(arquivo) == 0) return(NULL)
     
-    # 📥 Download com retry simples
-    tentativa <- 1
-    max_tentativas <- 3
-    
-    while(tentativa <= max_tentativas){
+    for(i in 1:3){
       
       ok <- tryCatch({
         drive_download(arquivo$id, path = arq_dest, overwrite = TRUE)
@@ -116,17 +94,12 @@ download_caged <- function(ref = NULL,
         return(arq_dest)
       }
       
-      tentativa <- tentativa + 1
       Sys.sleep(1)
     }
     
-    cli::cli_alert_danger(paste("Falha após tentativas:", ym))
+    cli::cli_alert_danger(paste("Falha:", ym))
     return(NULL)
   }
-  
-  # =========================
-  # 🚀 EXECUÇÃO
-  # =========================
   
   resultados <- vector("list", nrow(estrutura))
   
@@ -139,36 +112,34 @@ download_caged <- function(ref = NULL,
     cli::cli_progress_update(pb, inc = 1)
   }
   
+  # 🔥 garante 100%
+  cli::cli_progress_update(pb, set = nrow(estrutura))
   cli::cli_progress_done(pb)
   
-  # =========================
-  # 📦 RETORNO
-  # =========================
-  
-  baixados <- unlist(resultados)
-  baixados <- baixados[!is.na(baixados)]
-  
   cli::cli_h2("📦 Resumo")
-  cli::cli_alert_success(paste("Arquivos válidos:", length(baixados)))
+  cli::cli_alert_success(paste("Arquivos válidos:", sum(!is.na(resultados))))
   
-  return(invisible(baixados))
+  invisible(unlist(resultados))
 }
+
 
 processar_caged <- function(origem = "dados_caged_raw",
                             destino = "dados_caged_parquet",
                             sobrescrever = FALSE) {
   
-  library(readxl)
-  library(dplyr)
-  library(stringr)
-  library(tidyr)
-  library(purrr)
-  library(arrow)
-  library(cli)
+  suppressPackageStartupMessages({
+    library(readxl)
+    library(dplyr)
+    library(stringr)
+    library(tidyr)
+    library(purrr)
+    library(arrow)
+    library(cli)
+  })
   
   dir.create(destino, showWarnings = FALSE)
   
-  cli_h1("⚙️ Processamento CAGED")
+  cli::cli_h1("⚙️ Processamento CAGED")
   
   # =========================
   # 🔧 TRATAMENTO BASE
@@ -215,23 +186,23 @@ processar_caged <- function(origem = "dados_caged_raw",
       filter(!is.na(valor))
   }
   
-  # =========================
-  # 📊 PROCESSAMENTO POR ARQUIVO
-  # =========================
-  
   arquivos <- list.files(origem, full.names = TRUE, pattern = "xlsx$")
+  
+  pb <- cli::cli_progress_bar(
+    total = length(arquivos),
+    format = "Processamento [{bar}] {percent}"
+  )
   
   for(path in arquivos){
     
-    ym <- stringr::str_extract(path, "\\d{6}")
+    ym <- str_extract(path, "\\d{6}")
     out <- file.path(destino, paste0("CAGED_", ym, ".parquet"))
     
     if(file.exists(out) && !sobrescrever){
-      cli_alert_info(paste("Já processado:", ym))
+      cli::cli_inform(paste("Já processado:", ym))
+      cli::cli_progress_update(pb, inc = 1)
       next
     }
-    
-    cli_alert_info(paste("Processando:", ym))
     
     abas <- excel_sheets(path)
     
@@ -242,41 +213,49 @@ processar_caged <- function(origem = "dados_caged_raw",
         error = function(e) NULL
       )
       
-      tryCatch(
-        tratar_tabela(df, aba, ym),
-        error = function(e) NULL
-      )
+      tryCatch(tratar_tabela(df, aba, ym), error = function(e) NULL)
     })
     
     if(nrow(dados) > 0){
       write_parquet(dados, out)
-      cli_alert_success(paste("OK:", ym))
-    } else {
-      cli_alert_warning(paste("Sem dados:", ym))
+      cli::cli_alert_success(paste("OK:", ym))
     }
+    
+    cli::cli_progress_update(pb, inc = 1)
   }
+  
+  cli::cli_progress_update(pb, set = length(arquivos))
+  cli::cli_progress_done(pb)
   
   invisible(TRUE)
 }
 
+
+
 CAGED <- function(ref = NULL,
                   consolidar = TRUE) {
   
-  library(cli)
-  library(arrow)
+  suppressPackageStartupMessages({
+    library(cli)
+    library(arrow)
+  })
   
-  cli_h1("🚀 Pipeline CAGED (PRO)")
+  cli::cli_h1("🚀 Pipeline CAGED (PRO)")
   
   download_caged(ref)
   processar_caged()
   
   if(consolidar){
-    cli_h2("📊 Consolidando dataset")
-    return(open_dataset("dados_caged_parquet"))
+    cli::cli_h2("📊 Consolidando dataset")
+    base <- arrow::open_dataset("dados_caged_parquet")
+    cli::cli_alert_success("Dataset pronto!")
+    return(base)
   }
   
   invisible(NULL)
 }
+
+
 
 download_caged("202407")
 
