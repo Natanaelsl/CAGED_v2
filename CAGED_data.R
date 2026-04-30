@@ -19,7 +19,9 @@ download_caged <- function(ref = NULL,
   # =========================
   
   if(temp){
-    destino <- tempfile("CAGED_", tmpdir = tempdir())
+    if(missing(destino) || is.null(destino)){
+      destino <- tempfile("CAGED_", tmpdir = tempdir())
+    }
     dir.create(destino, showWarnings = FALSE)
     cli::cli_alert_info(paste("Modo temporário:", destino))
   } else {
@@ -49,7 +51,7 @@ download_caged <- function(ref = NULL,
     arrange(ym)
   
   # =========================
-  # 🎯 FILTRO INTELIGENTE
+  # 🎯 FILTRO
   # =========================
   
   if(!is.null(ref)){
@@ -57,7 +59,7 @@ download_caged <- function(ref = NULL,
     if(ref %in% c("last", "latest")){
       
       estrutura <- estrutura %>% slice_tail(n = 1)
-      cli::cli_alert_info(paste("Selecionado último período:", estrutura$ym))
+      cli::cli_alert_info(paste("Último período:", estrutura$ym))
       
     } else if(str_detect(ref, "^\\d{6}$")){
       
@@ -94,21 +96,32 @@ download_caged <- function(ref = NULL,
     
     arq_dest <- file.path(destino, paste0("CAGED_", ym, ".xlsx"))
     
-    # Pula cache apenas no modo permanente
+    # Cache (só fora do temp)
     if(!temp && file.exists(arq_dest)){
       cli::cli_inform(paste("Já existe:", ym))
       return(arq_dest)
     }
     
-    arquivos <- tryCatch(drive_ls(mes_id), error = function(e) NULL)
-    if(is.null(arquivos)) return(NULL)
+    arquivos <- tryCatch(
+      drive_ls(mes_id),
+      error = function(e) NULL
+    )
+    
+    if(is.null(arquivos)){
+      cli::cli_alert_danger(paste("Erro ao listar:", ym))
+      return(NULL)
+    }
     
     arquivo <- arquivos %>%
       filter(str_detect(name, "\\.xlsx")) %>%
       slice(1)
     
-    if(nrow(arquivo) == 0) return(NULL)
+    if(nrow(arquivo) == 0){
+      cli::cli_alert_warning(paste("Sem XLSX:", ym))
+      return(NULL)
+    }
     
+    # Retry
     for(i in 1:3){
       
       ok <- tryCatch({
@@ -153,7 +166,6 @@ download_caged <- function(ref = NULL,
   
   cli::cli_h2("📦 Resumo")
   cli::cli_alert_success(paste("Arquivos válidos:", validos))
-  if(temp) cli::cli_alert_info(paste("Diretório temporário:", destino))
   
   invisible(unlist(resultados))
 }
@@ -296,12 +308,19 @@ CAGED <- function(ref = NULL,
 
 
 # 1. Defina o caminho do seu arquivo
-arquivo_data <- download_caged("202601", temp = FALSE)
+arquivo_data <- download_caged("last", temp = FALSE)
 
+download_caged("202601", destino = "meus_dados/caged")
 
-
-
-
+###################################################################
+# ⚠️ Limitação atual (sutil, mas importante)
+#
+# Hoje você não consegue fazer isso:
+#  
+#  download_caged("202601", temp = TRUE, destino = "minha_pasta")
+#
+# 👉 Porque temp = TRUE sempre sobrescreve destino
+####################################################################
 
 
 # 2. Capture os nomes das abas automaticamente
@@ -504,14 +523,18 @@ tab7_limpa <- limpar_caged_dinamico(
 
 
 #excel_sheets("dados_caged/CAGED_202407.xlsx")
-# Último mês disponível
-# download_caged("last")
-# Ano inteiro
-# download_caged("2024")
-# Mês específico
-# download_caged("202407")
-# Tudo
-# download_caged()
+# # Só download
+# download_caged("202601")
+# 
+# # Download + parquet automático
+# download_caged("202601", parquet = TRUE)
+# 
+# # Último mês + parquet
+# download_caged("last", parquet = TRUE)
+# 
+# # Pipeline temporário (sem cache)
+# download_caged("last", temp = TRUE, parquet = TRUE)
+# download_caged("202601", destino = "meus_dados/caged")
 
 # processar_caged() # camada SILVER
 # CAGED()           # orquestrador
