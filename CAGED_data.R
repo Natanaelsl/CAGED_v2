@@ -335,7 +335,7 @@ processar_caged <- function(origem = "dados_caged_raw",
   
   # Retorna a lista dividida por aba para manter sua estrutura de análise
   return(split(df_unificado, df_unificado$Tabela_Origem))
-}
+} # <---- ADD FUNÇÃO DE CONSOLIDAR OU NÃO PARQUET!!
 
 
 
