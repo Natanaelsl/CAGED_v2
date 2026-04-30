@@ -296,7 +296,12 @@ CAGED <- function(ref = NULL,
 
 
 # 1. Defina o caminho do seu arquivo
-arquivo_data <- download_caged("last", temp = TRUE)
+arquivo_data <- download_caged("202601", temp = FALSE)
+
+
+
+
+
 
 
 # 2. Capture os nomes das abas automaticamente
