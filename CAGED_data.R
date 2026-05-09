@@ -1,3 +1,7 @@
+options(scipen = 999)
+
+# 1. FUNÇÃO DE DOWNLOAD (Otimizada para API) ----
+
 download_caged <- function(ref = NULL,
                            destino = "dados_caged_raw",
                            temp = FALSE) {
@@ -11,19 +15,15 @@ download_caged <- function(ref = NULL,
   })
   
   drive_deauth()
-  
   root_id <- "1F89h6odTPGIGMb9eDiJKCute9W89QmqN"
   
   # =========================
   # 📁 DESTINO
   # =========================
-  
   if(temp){
-    if(missing(destino) || is.null(destino)){
-      destino <- tempfile("CAGED_", tmpdir = tempdir())
-    }
-    dir.create(destino, showWarnings = FALSE)
-    cli::cli_alert_info(paste("Modo temporário:", destino))
+    # Garante que o arquivo vá para a raiz do tempdir para facilitar a busca depois
+    destino <- tempdir()
+    cli::cli_alert_info(paste("Modo temporário ativado. Destino:", destino))
   } else {
     dir.create(destino, showWarnings = FALSE)
   }
@@ -31,57 +31,49 @@ download_caged <- function(ref = NULL,
   cli::cli_h1("📥 Download CAGED (RAW)")
   
   # =========================
-  # 🔎 LISTAR DRIVE
+  # 🔎 BUSCA INTELIGENTE NA API
   # =========================
+  anos <- drive_ls(as_id(root_id)) %>% filter(!str_detect(name, "\\."))
   
-  anos <- drive_ls(as_id(root_id)) %>%
-    filter(!str_detect(name, "\\."))
-  
-  estrutura <- purrr::map_df(seq_len(nrow(anos)), function(i){
-    
-    meses <- drive_ls(anos$id[i]) %>%
-      filter(!str_detect(name, "\\."))
-    
-    tibble(
-      ym = meses$name,
-      id = meses$id
-    )
-    
-  }) %>% 
-    arrange(ym)
-  
-  # =========================
-  # 🎯 FILTRO
-  # =========================
-  
-  if(!is.null(ref)){
-    
-    if(ref %in% c("last", "latest")){
-      
-      estrutura <- estrutura %>% slice_tail(n = 1)
-      cli::cli_alert_info(paste("Último período:", estrutura$ym))
-      
-    } else if(str_detect(ref, "^\\d{6}$")){
-      
-      estrutura <- estrutura %>% filter(ym == ref)
-      
-    } else if(str_detect(ref, "^\\d{4}$")){
-      
-      estrutura <- estrutura %>% filter(substr(ym,1,4) == ref)
-      
+  # Determina qual ano investigar para economizar chamadas na API do Drive
+  if(!is.null(ref)) {
+    if(ref %in% c("last", "latest")) {
+      anos_alvo <- anos %>% arrange(desc(name)) %>% slice(1)
+    } else if(str_detect(ref, "^\\d{6}$") || str_detect(ref, "^\\d{4}$")) {
+      ano_ref <- substr(ref, 1, 4)
+      anos_alvo <- anos %>% filter(name == ano_ref)
     } else {
       stop("Use: YYYY, YYYYMM ou 'last'")
+    }
+  } else {
+    anos_alvo <- anos
+  }
+  
+  if(nrow(anos_alvo) == 0){
+    cli::cli_alert_warning("Ano não encontrado no Drive.")
+    return(invisible(NULL))
+  }
+  
+  # Mapeia apenas as pastas do ano(s) alvo
+  estrutura <- purrr::map_df(seq_len(nrow(anos_alvo)), function(i){
+    meses <- drive_ls(anos_alvo$id[i]) %>% filter(!str_detect(name, "\\."))
+    tibble(ym = meses$name, id = meses$id)
+  }) %>% arrange(ym)
+  
+  # Refina o filtro para o mês específico (se aplicável)
+  if(!is.null(ref)) {
+    if(ref %in% c("last", "latest")) {
+      estrutura <- estrutura %>% slice_tail(n = 1)
+      cli::cli_alert_info(paste("Último período identificado:", estrutura$ym))
+    } else if(str_detect(ref, "^\\d{6}$")) {
+      estrutura <- estrutura %>% filter(ym == ref)
     }
   }
   
   if(nrow(estrutura) == 0){
-    cli::cli_alert_warning("Nenhum período encontrado")
+    cli::cli_alert_warning("Período específico não encontrado.")
     return(invisible(NULL))
   }
-  
-  # =========================
-  # 📊 PROGRESS BAR
-  # =========================
   
   pb <- cli::cli_progress_bar(
     total  = nrow(estrutura),
@@ -89,97 +81,57 @@ download_caged <- function(ref = NULL,
   )
   
   # =========================
-  # 📥 DOWNLOAD
+  # 📥 DOWNLOAD ROBUSTO
   # =========================
-  
   baixar_mes <- function(mes_id, ym){
-    
     arq_dest <- file.path(destino, paste0("CAGED_", ym, ".xlsx"))
     
-    # Cache (só fora do temp)
     if(!temp && file.exists(arq_dest)){
-      cli::cli_inform(paste("Já existe:", ym))
+      cli::cli_inform(paste("Arquivo já existe no cache local:", ym))
       return(arq_dest)
     }
     
-    arquivos <- tryCatch(
-      drive_ls(mes_id),
-      error = function(e) NULL
-    )
+    arquivos <- tryCatch(drive_ls(mes_id), error = function(e) NULL)
+    if(is.null(arquivos)) return(NULL)
     
-    if(is.null(arquivos)){
-      cli::cli_alert_danger(paste("Erro ao listar:", ym))
-      return(NULL)
-    }
+    arquivo <- arquivos %>% filter(str_detect(name, "\\.xlsx")) %>% slice(1)
+    if(nrow(arquivo) == 0) return(NULL)
     
-    arquivo <- arquivos %>%
-      filter(str_detect(name, "\\.xlsx")) %>%
-      slice(1)
-    
-    if(nrow(arquivo) == 0){
-      cli::cli_alert_warning(paste("Sem XLSX:", ym))
-      return(NULL)
-    }
-    
-    # Retry
     for(i in 1:3){
-      
       ok <- tryCatch({
         drive_download(arquivo$id, path = arq_dest, overwrite = TRUE)
         TRUE
       }, error = function(e) FALSE)
       
-      if(ok){
-        cli::cli_alert_success(paste("Baixado:", ym))
+      if(ok) {
+        cli::cli_alert_success(paste("Baixado com sucesso:", ym))
         return(arq_dest)
       }
-      
       Sys.sleep(1)
     }
-    
-    cli::cli_alert_danger(paste("Falha:", ym))
+    cli::cli_alert_danger(paste("Falha após 3 tentativas:", ym))
     return(NULL)
   }
   
-  # =========================
-  # 🚀 EXECUÇÃO
-  # =========================
-  
   resultados <- vector("list", nrow(estrutura))
-  
   for(i in seq_len(nrow(estrutura))){
-    
-    ym <- estrutura$ym[i]
-    
-    resultados[[i]] <- baixar_mes(estrutura$id[i], ym)
-    
+    resultados[[i]] <- baixar_mes(estrutura$id[i], estrutura$ym[i])
     cli::cli_progress_update(id = pb, inc = 1)
   }
   
   cli::cli_progress_done(id = pb)
+  validos <- sum(!sapply(resultados, is.null))
+  cli::cli_alert_success(paste("Arquivos válidos baixados:", validos))
   
-  # =========================
-  # 📦 RESUMO
-  # =========================
-  
-  validos <- sum(!is.na(resultados))
-  
-  cli::cli_h2("📦 Resumo")
-  cli::cli_alert_success(paste("Arquivos válidos:", validos))
-  
-  invisible(unlist(resultados))
+  return(invisible(unlist(resultados)))
 }
 
 
+# 2. FUNÇÃO DE PROCESSAMENTO (Código DRY) ----
 
-######################################################
-
-
-# Certifique-se de ter os pacotes instalados: install.packages(c("readxl", "dplyr", "stringr", "tidyr", "purrr", "arrow", "cli"))
-
-options(scipen = 999)
-
-processar_caged <- function(origem = "dados_caged_raw", 
+processar_caged <- function(usar_temporario = FALSE, 
+                            parquet_individual = FALSE, 
+                            origem = "dados_caged_raw", 
                             destino = "dados_caged_parquet") {
   
   suppressPackageStartupMessages({
@@ -192,538 +144,177 @@ processar_caged <- function(origem = "dados_caged_raw",
     library(cli)
   })
   
-  # 1. Identifica o arquivo acumulado mais recente
-  arquivos <- list.files(origem, full.names = TRUE, pattern = "xlsx$")
-  if (length(arquivos) == 0) {
-    cli::cli_alert_danger("Nenhum arquivo .xlsx encontrado em {origem}")
-    return(NULL)
+  if (usar_temporario) {
+    pasta_busca <- tempdir()
+    cli::cli_alert_info("Modo Temp Automático: Buscando na memória do sistema...")
+  } else {
+    pasta_busca <- origem
   }
-  caminho_arquivo <- tail(sort(arquivos), 1)
-  cli::cli_h1("⚙️ Processando Base Acumulada (parquet): {basename(caminho_arquivo)}")
   
-  # ==========================================
-  # 🛠️ MOTOR DE LIMPEZA (REGRAS SILENCIOSAS)
-  # ==========================================
+  arquivos <- list.files(pasta_busca, full.names = TRUE, pattern = "xlsx$", recursive = TRUE)
+  
+  if (length(arquivos) == 0) {
+    cli::cli_alert_danger("Nenhum arquivo .xlsx encontrado em: {pasta_busca}")
+    return(invisible(NULL))
+  }
+  
+  info_arquivos <- file.info(arquivos)
+  caminho_arquivo <- rownames(info_arquivos)[which.max(info_arquivos$mtime)]
+  cli::cli_h1("⚙️ Processando Base: {basename(caminho_arquivo)}")
+  
+  # --- SUBFUNÇÃO PARA EVITAR REPETIÇÃO ---
+  padronizar_cabecalho <- function(df_local, colunas_chave) {
+    indice_corte <- which(str_detect(str_trim(df_local[[1]]), "(?i)^Não identificado"))[1]
+    if(!is.na(indice_corte)) df_limpo <- df_local %>% slice(1:indice_corte) else df_limpo <- df_local
+    
+    nomes_periodo <- names(df_limpo)
+    nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
+    for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
+    
+    nomes_variaveis <- as.character(df_limpo[1, ])
+    nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
+    
+    # Substitui os nomes das chaves (CNAE, UF, Municipio, etc)
+    nomes_finais[1:length(colunas_chave)] <- colunas_chave
+    names(df_limpo) <- nomes_finais
+    df_limpo <- df_limpo[-1, ]
+    
+    df_limpo %>% 
+      pivot_longer(cols = -all_of(colunas_chave), names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
+      mutate(Valor = suppressWarnings(as.numeric(Valor)), 
+             Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim())
+  }
+  # ----------------------------------------
+  
   limpar_caged_dinamico <- function(df, nome_aba) {
     df <- df %>% mutate(across(everything(), as.character))
     nome_aba <- str_trim(nome_aba)
     
-    # REGRA: CNAE (1, 6, 6.1, 10)
     if (str_detect(nome_aba, "^Tabela 1|^Tabela 6|^Tabela 10")) {
-      indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-      if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-      nomes_periodo <- names(df_limpo)
-      nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-      for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-      nomes_variaveis <- as.character(df_limpo[1, ])
-      nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-      nomes_finais[1] <- "Grupamento_CNAE" 
-      names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(-Grupamento_CNAE, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(as.numeric(Valor)), 
-                      Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()))
+      return(padronizar_cabecalho(df, c("Grupamento_CNAE")))
       
-      # REGRA: UF/REGIAO (2, 7, 7.1, 11)
     } else if (str_detect(nome_aba, "^Tabela 2|^Tabela 7|^Tabela 11")) {
-      indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-      if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-      nomes_periodo <- names(df_limpo)
-      nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-      for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-      nomes_variaveis <- as.character(df_limpo[1, ])
-      nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-      nomes_finais[1] <- "Regiao_UF" 
-      names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(-Regiao_UF, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(as.numeric(Valor)), 
-                      Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()))
+      return(padronizar_cabecalho(df, c("Regiao_UF")))
       
-      # REGRA: MUNICIPIOS (3, 8, 8.1)
     } else if (str_detect(nome_aba, "^Tabela 3|^Tabela 8")) {
-      indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-      if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-      nomes_periodo <- names(df_limpo)
-      nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-      for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-      nomes_variaveis <- as.character(df_limpo[1, ])
-      nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-      nomes_finais[1] <- "UF" ; nomes_finais[2] <- "Codigo_Municipio" ; nomes_finais[3] <- "Municipio" 
-      names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(cols = -c(UF, Codigo_Municipio, Municipio), names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(as.numeric(Valor)), 
-                      Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()))
+      return(padronizar_cabecalho(df, c("UF", "Codigo_Municipio", "Municipio")))
       
-      # REGRA: CATEGORIAS (4)
     } else if (str_detect(nome_aba, "^Tabela 4")) {
-      indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-      if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-      nomes_periodo <- names(df_limpo)
-      nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-      for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-      nomes_variaveis <- as.character(df_limpo[1, ])
-      nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-      nomes_finais[1] <- "Categoria" 
-      names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(-Categoria, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(as.numeric(Valor)), 
-                      Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()))
+      return(padronizar_cabecalho(df, c("Categoria")))
       
-      # REGRA: SERIES HISTORICAS (5, 5.1)
     } else if (str_detect(nome_aba, "^Tabela 5")) {
       indice_corte <- which(str_detect(df[[1]], "(?i)^Fonte|^Nota"))[1]
       if (!is.na(indice_corte)) df_limpo <- df %>% slice(1:(indice_corte - 1)) else df_limpo <- df
       nomes_finais <- as.character(df_limpo[1, ])
       nomes_finais[1] <- "Periodo"
       names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(cols = -Periodo, names_to = "Metrica", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(as.numeric(Valor)), 
-                      Periodo = str_remove_all(Periodo, "\\*\\*.*|\\*") %>% str_trim()))
+      return(df_limpo[-1, ] %>% pivot_longer(cols = -Periodo, names_to = "Metrica", values_to = "Valor") %>%
+               mutate(Valor = suppressWarnings(as.numeric(Valor)), Periodo = str_remove_all(Periodo, "\\*\\*.*|\\*") %>% str_trim()))
       
-      # REGRA: SALARIOS (9)
     } else if (str_detect(nome_aba, "^Tabela 9")) {
       indice_corte <- which(str_detect(df[[1]], "(?i)^Fonte|^Nota"))[1]
       if (!is.na(indice_corte)) df_limpo <- df %>% slice(1:(indice_corte - 1)) else df_limpo <- df
       nomes_finais <- as.character(df_limpo[1, ])
       nomes_finais[1] <- "Periodo"
       names(df_limpo) <- nomes_finais
-      df_limpo <- df_limpo[-1, ] 
-      return(df_limpo %>% pivot_longer(cols = -Periodo, names_to = "Metrica", values_to = "Valor") %>%
-               mutate(Valor = suppressWarnings(ifelse(str_detect(Valor, "R\\$"), 
-                                                      as.numeric(str_replace(str_remove_all(Valor, "R\\$\\s*|\\."), ",", ".")), 
-                                                      as.numeric(Valor))),
+      return(df_limpo[-1, ] %>% pivot_longer(cols = -Periodo, names_to = "Metrica", values_to = "Valor") %>%
+               mutate(Valor = suppressWarnings(ifelse(str_detect(Valor, "R\\$"), as.numeric(str_replace(str_remove_all(Valor, "R\\$\\s*|\\."), ",", ".")), as.numeric(Valor))),
                       Periodo = str_remove_all(Periodo, "\\*\\*.*|\\*") %>% str_trim()))
     }
     return(NULL)
   }
   
-  # ==========================================
-  # 🔄 PROCESSAMENTO E UNIFICAÇÃO
-  # ==========================================
   abas <- excel_sheets(caminho_arquivo)
   
-  # Mapeia as abas, limpa e adiciona a identificação da origem
-  df_unificado <- purrr::map_dfr(abas, function(aba) {
-    df_bruto <- tryCatch({
-      suppressMessages(readxl::read_excel(caminho_arquivo, sheet = aba, skip = 4))
-    }, error = function(e) NULL)
-    
-    if (is.null(df_bruto)) return(NULL)
-    
+  lista_tabelas <- purrr::map(abas, function(aba) {
+    df_bruto <- tryCatch(suppressMessages(readxl::read_excel(caminho_arquivo, sheet = aba, skip = 4)), error = function(e) NULL)
+    if (is.null(df_bruto) || nrow(df_bruto) == 0) return(NULL)
     df_limpo <- limpar_caged_dinamico(df_bruto, aba)
-    
-    if (!is.null(df_limpo)) {
-      return(df_limpo %>% mutate(Tabela_Origem = aba))
-    } else {
-      return(NULL)
-    }
+    if (!is.null(df_limpo)) return(df_limpo %>% mutate(Tabela_Origem = aba)) else return(NULL)
   })
   
-  # 💾 SALVAMENTO EM ARQUIVO ÚNICO
+  names(lista_tabelas) <- abas
+  lista_tabelas <- lista_tabelas[!sapply(lista_tabelas, is.null)]
+  
   dir.create(destino, showWarnings = FALSE)
   ym <- str_extract(basename(caminho_arquivo), "\\d{4,6}")
-  if(is.na(ym)) ym <- "BASE_ATUAL"
+  if(is.na(ym)) ym <- "ATUAL"
   
-  caminho_final <- file.path(destino, paste0("CAGED_CONSOLIDADO_", ym, ".parquet"))
-  arrow::write_parquet(df_unificado, caminho_final)
+  if (parquet_individual) {
+    purrr::iwalk(lista_tabelas, ~{
+      nome_safe <- str_replace_all(.y, "[^a-zA-Z0-9]", "_")
+      arrow::write_parquet(.x, file.path(destino, paste0("CAGED_", nome_safe, "_", ym, ".parquet")))
+    })
+    cli::cli_alert_success("Concluído! Tabelas individuais em: {destino}")
+  } else {
+    df_consolidado <- dplyr::bind_rows(lista_tabelas)
+    caminho_final <- file.path(destino, paste0("CAGED_CONSOLIDADO_", ym, ".parquet"))
+    arrow::write_parquet(df_consolidado, caminho_final)
+    cli::cli_alert_success("Concluído! Base unificada em: {basename(caminho_final)}")
+  }
   
-  cli::cli_alert_success("Processamento concluído! Todas as abas unificadas em: {basename(caminho_final)}")
-  
-  # Retorna a lista dividida por aba para manter sua estrutura de análise
-  return(split(df_unificado, df_unificado$Tabela_Origem))
-} # <---- ADD FUNÇÃO DE CONSOLIDAR OU NÃO PARQUET!!
+  return(invisible(lista_tabelas))
+}
 
 
+# 3. FUNÇÃO ORQUESTRADORA (Conexão das Pontas) ----
 
-# --- COMO USAR: ---
-# 1. Crie uma pasta chamada "dados_caged_raw" onde o seu script do R está salvo.
-# 2. Jogue todos os seus Excels (.xlsx) baixados do CAGED lá dentro.
-# 3. Rode o comando abaixo:
-# data_frames_limpos <- processar_caged(origem = "dados_caged_raw", destino = "dados_caged_parquet")
-
-
-######################################################
-######################################################
-######################################################
-######################################################
-
-# ==========================================
-# 🚀 FUNÇÃO ORQUESTRADORA: CAGED
-# ==========================================
-CAGED <- function(ref = NULL, consolidar = TRUE) {
+CAGED <- function(ref = "last", 
+                  parquet_individual = FALSE, 
+                  arquivo_alvo = NULL) {
   
   suppressPackageStartupMessages({
     library(cli)
     library(arrow)
-    library(dplyr)
-    library(purrr)
   })
   
   cli::cli_h1("🚀 Pipeline CAGED (PRO)")
   
-  # 1. Download (Supõe-se que a função download_caged já existe)
-  # download_caged(ref) 
+  # O download roda avisando que é temporário
+  download_caged(ref = ref, temp = TRUE) 
   
-  # 2. Processamento (Usando a nossa função acumulada que gera os Parquets)
-  # Aqui chamamos a função que processa o último arquivo disponível
-  lista_tabelas <- processar_caged()
+  # O processamento usa a pasta temporária automaticamente
+  processar_caged(usar_temporario = TRUE, 
+                  parquet_individual = parquet_individual)
   
-  if(consolidar){
-    cli::cli_h2("📊 Consolidando dataset")
+  cli::cli_h2("📊 Abrindo dataset via Arrow")
+  
+  if (parquet_individual) {
+    if (is.null(arquivo_alvo)) {
+      cli::cli_alert_danger("Erro: Defina o caminho exato no argumento 'arquivo_alvo'.")
+      return(invisible(NULL)) 
+    }
+    base <- arrow::open_dataset(arquivo_alvo)
+    cli::cli_alert_success(paste("Tabela individual carregada:", basename(arquivo_alvo)))
     
-    # Abre o diretório onde os parquets foram salvos pela função de processamento
-    base <- arrow::open_dataset("dados_caged_parquet")
-    
-    cli::cli_alert_success("Dataset pronto para consulta via Arrow!")
-    return(base)
+  } else {
+    arquivos_consolidados <- list.files("dados_caged_parquet", pattern = "CONSOLIDADO", full.names = TRUE)
+    if (length(arquivos_consolidados) == 0) {
+      cli::cli_alert_danger("Nenhum arquivo consolidado encontrado na pasta.")
+      return(invisible(NULL))
+    }
+    caminho_padrao <- tail(sort(arquivos_consolidados), 1)
+    base <- arrow::open_dataset(caminho_padrao)
+    cli::cli_alert_success(paste("Dataset consolidado carregado:", basename(caminho_padrao)))
   }
   
-  return(lista_tabelas)
+  return(base)
 }
 
 
-# Baixa, processa e já te entrega o link para o dataset consolidado
+# --- EXEMPLOS DE USO ----
 download_caged("last")
+processar_caged(usar_temporario = TRUE)
 base_fiscal <- CAGED() 
 
 
-# Exemplo de uso ultra rápido com a base consolidada:
+
 Tab7 <- base_fiscal %>% 
   filter(Tabela_Origem == "Tabela 7") %>% 
   collect()
 
 
-
-
-######################################################
-
-
-# 1. Defina o caminho do seu arquivo
-arquivo_data <- download_caged("last", temp = TRUE)
-
-# download_caged("202601", destino = "meus_dados/caged")
-
-###################################################################
-# ⚠️ Limitação atual (sutil, mas importante)
-#
-# Hoje você não consegue fazer isso:
-#  
-#  download_caged("202601", temp = TRUE, destino = "minha_pasta")
-#
-# 👉 Porque temp = TRUE sempre sobrescreve destino
-####################################################################
-
-
-
-
-# 2. Capture os nomes das abas automaticamente
-planilhas <- readxl::excel_sheets(arquivo_data)
-
-# Função para ler uma planilha
-ler_planilha <- function(planilha, arquivo) {
-  readxl::read_excel(arquivo, sheet = planilha, skip = 4)
-}
-
-# 1. Criação do Cluster (Deixando 1 núcleo livre)
-n_cores <- max(1, parallel::detectCores() - 1)
-cluster <- parallel::makeCluster(n_cores)
-
-# 2. Execução Paralela COM Barra de Progresso
-# Usamos pbapply::pblapply no lugar de parallel::parLapply.
-# O argumento 'cl = cluster' avisa a função para usar o modo paralelo.
-cli::cli_h2("Lendo planilhas em paralelo...")
-
-data_frames <- pbapply::pblapply(
-  cl = cluster,          # Passamos o cluster criado
-  X = planilhas,         # Nossa lista de planilhas
-  FUN = ler_planilha,    # A função
-  arquivo = arquivo_data # O argumento extra da função
+base_municipios <- CAGED(
+  parquet_individual = TRUE, 
+  arquivo_alvo = "dados_caged_parquet/CAGED_Tabela_3_ATUAL.parquet"
 )
-
-# 3. Fechar Cluster e Renomear
-parallel::stopCluster(cluster)
-names(data_frames) <- planilhas
-
-cli::cli_alert_success("Leitura concluída!")
-
-####################################################
-
-
-
-
-
-options(scipen = 999)
-
-library(dplyr)
-library(tidyr)
-library(stringr)
-library(purrr)
-library(readr)
-
-# ==========================================
-# 🛠️ FUNÇÃO INTELIGENTE (ROTEADOR DE ABAS)
-# ==========================================
-
-limpar_caged_dinamico <- function(df, nome_aba) {
-  
-  # --- 🛡️ CAMADAS DE SEGURANÇA GLOBAIS ---
-  # 1. Força todas as colunas a serem texto puro para evitar erro no pivot_longer
-  df <- df %>% mutate(across(everything(), as.character))
-  
-  # 2. Limpa espaços extras no nome da aba
-  nome_aba <- str_trim(nome_aba)
-  
-  # ----------------------------------------
-  # 🟣 REGRA: TABELAS 1, 6, 6.1 e 10 (Grupamento CNAE)
-  # ----------------------------------------
-  if (str_detect(nome_aba, "^Tabela 1|^Tabela 6|^Tabela 10")) { 
-    
-    indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-    if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-    
-    nomes_periodo <- names(df_limpo)
-    nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-    for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-    
-    nomes_variaveis <- as.character(df_limpo[1, ])
-    nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-    nomes_finais[1] <- "Grupamento_CNAE" 
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(-Grupamento_CNAE, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-      mutate(
-        Valor = as.numeric(Valor),
-        Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🟢 REGRA: TABELAS 2, 7, 7.1 e 11 (Região e UF)
-    # ----------------------------------------
-  } else if (str_detect(nome_aba, "^Tabela 2|^Tabela 7|^Tabela 11")) { # <-- Tabela 11 adicionada aqui!
-    
-    indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-    if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-    
-    nomes_periodo <- names(df_limpo)
-    nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-    for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-    
-    nomes_variaveis <- as.character(df_limpo[1, ])
-    nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-    nomes_finais[1] <- "Regiao_UF" 
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(-Regiao_UF, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-      mutate(
-        Valor = as.numeric(Valor),
-        Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🔵 REGRA: TABELAS 3, 8 e 8.1 (Municípios)
-    # ----------------------------------------
-  } else if (str_detect(nome_aba, "^Tabela 3|^Tabela 8")) { 
-    
-    indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-    if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-    
-    nomes_periodo <- names(df_limpo)
-    nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-    for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-    
-    nomes_variaveis <- as.character(df_limpo[1, ])
-    nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-    
-    nomes_finais[1] <- "UF" 
-    nomes_finais[2] <- "Codigo_Municipio" 
-    nomes_finais[3] <- "Municipio" 
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(
-        cols = -c(UF, Codigo_Municipio, Municipio), 
-        names_to = c("Periodo", "Metrica"), 
-        names_sep = "___", 
-        values_to = "Valor" 
-      ) %>%
-      mutate(
-        Valor = as.numeric(Valor),
-        Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🟠 REGRA: TABELA 4 (Grupamentos/Categorias)
-    # ----------------------------------------
-  } else if (str_detect(nome_aba, "^Tabela 4")) {
-    
-    indice_corte <- which(str_detect(str_trim(df[[1]]), "(?i)^Não identificado"))[1]
-    if(!is.na(indice_corte)) df_limpo <- df %>% slice(1:indice_corte) else df_limpo <- df
-    
-    nomes_periodo <- names(df_limpo)
-    nomes_periodo <- ifelse(grepl("^\\.\\.\\.", nomes_periodo), NA, nomes_periodo)
-    for(i in 2:length(nomes_periodo)) if(is.na(nomes_periodo[i])) nomes_periodo[i] <- nomes_periodo[i-1]
-    
-    nomes_variaveis <- as.character(df_limpo[1, ])
-    nomes_finais <- paste(nomes_periodo, nomes_variaveis, sep = "___")
-    nomes_finais[1] <- "Categoria" 
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(-Categoria, names_to = c("Periodo", "Metrica"), names_sep = "___", values_to = "Valor") %>%
-      mutate(
-        Valor = as.numeric(Valor),
-        Periodo = str_remove_all(Periodo, " - sem ajustes?| - com ajustes?|\\*\\*.*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🟤 REGRA: TABELAS 5 e 5.1 (Séries Históricas Padrão)
-    # ----------------------------------------
-  } else if (str_detect(nome_aba, "^Tabela 5")) {
-    
-    indice_corte <- which(str_detect(df[[1]], "(?i)^Fonte|^Nota"))[1]
-    
-    if (!is.na(indice_corte)) {
-      df_limpo <- df %>% slice(1:(indice_corte - 1))
-    } else {
-      df_limpo <- df
-    }
-    
-    nomes_finais <- as.character(df_limpo[1, ])
-    nomes_finais[1] <- "Periodo"
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(
-        cols = -Periodo, 
-        names_to = "Metrica", 
-        values_to = "Valor"
-      ) %>%
-      mutate(
-        Valor = as.numeric(Valor),
-        Periodo = str_remove_all(Periodo, "\\*\\*.*|\\*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🟡 REGRA: TABELAS 9 e 9.1 (Séries Históricas de Salários)
-    # ----------------------------------------
-  } else if (str_detect(nome_aba, "^Tabela 9")) {
-    
-    indice_corte <- which(str_detect(df[[1]], "(?i)^Fonte|^Nota"))[1]
-    if (!is.na(indice_corte)) df_limpo <- df %>% slice(1:(indice_corte - 1)) else df_limpo <- df
-    
-    nomes_finais <- as.character(df_limpo[1, ])
-    nomes_finais[1] <- "Periodo"
-    
-    names(df_limpo) <- nomes_finais
-    df_limpo <- df_limpo[-1, ] 
-    
-    df_final <- df_limpo %>%
-      pivot_longer(
-        cols = -Periodo, 
-        names_to = "Metrica", 
-        values_to = "Valor"
-      ) %>%
-      mutate(
-        Valor = ifelse(
-          str_detect(Valor, "R\\$"),
-          as.numeric(str_replace(str_remove_all(Valor, "R\\$\\s*|\\."), ",", ".")),
-          as.numeric(Valor)
-        ),
-        Periodo = str_remove_all(Periodo, "\\*\\*.*|\\*") %>% str_trim()
-      )
-    
-    return(df_final)
-    
-    # ----------------------------------------
-    # 🔴 REGRA: ABA DESCONHECIDA
-    # ----------------------------------------
-  } else {
-    cli::cli_alert_warning(paste("Nenhuma regra de limpeza definida para:", nome_aba))
-    return(df)
-  }
-}
-
-# ==========================================
-# 🚀 APLICANDO COM IMAP
-# ==========================================
-
-cli::cli_h2("⚙️ Estruturando Tabelas por Regras...")
-
-# O 'imap' é o segredo aqui: ele passa o 'df' (.x) e o 'nome_aba' (.y) para a função
-data_frames_limpos <- purrr::imap(
-  .x = data_frames, 
-  .f = limpar_caged_dinamico,
-  .progress = "Tratando tabelas"
-)
-
-cli::cli_alert_success("Limpeza concluída com roteamento específico!")
-
-
-
-
-
-
-
-
-#############################
-
-tab8_limpa <- limpar_caged_dinamico(
-  df = data_frames[["Tabela 8"]], 
-  nome_aba = "Tabela 8"
-)
-
-
-
-
-
-####################################################
-
-# dados    <- processar_arquivo(arquivos)
-
-
-
-
-
-
-#excel_sheets("dados_caged/CAGED_202407.xlsx")
-# # Só download
-# download_caged("202601")
-# 
-# # Download + parquet automático
-# download_caged("202601", parquet = TRUE)
-# 
-# # Último mês + parquet
-# download_caged("last", parquet = TRUE)
-# 
-# # Pipeline temporário (sem cache)
-# download_caged("last", temp = TRUE, parquet = TRUE)
-# download_caged("202601", destino = "meus_dados/caged")
-
-# processar_caged() # camada SILVER
-# CAGED()           # orquestrador

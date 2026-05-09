@@ -1,0 +1,35 @@
+Aqui está o mapa de como construir essa arquitetura autônoma para que seu Shiny leia sempre a versão mais atualizada sem travar:
+
+1. A Regra de Ouro do Shiny
+O seu aplicativo Shiny nunca deve chamar a função download_caged() ou processar_caged().
+O papel do Shiny será única e exclusivamente executar arrow::open_dataset() na sua pasta de Parquets consolidados. Como o Arrow é muito rápido, o seu dashboard vai abrir instantaneamente para o usuário da SEFAZ, consumindo os dados já pré-processados.
+
+2. Criando o Script Autônomo (O "Gatilho")
+Você precisará de um script R separado (por exemplo, atualizador_caged.R) que rodará em segundo plano, independente do Shiny.
+
+Crie um arquivo chamado atualizador_caged.R ########
+
+3. Como Agendar a Autonomia (O "Robô")
+O próximo passo é dizer ao sistema operacional para rodar esse script atualizador_caged.R sozinho (por exemplo, todo dia 15 do mês, ou toda madrugada de domingo). A forma de fazer isso depende de onde o seu Shiny vai ficar hospedado:
+
+Se o Servidor for Windows (Muito comum em infraestruturas do Governo/SEFAZ):
+Você usará o Agendador de Tarefas do Windows (Task Scheduler).
+
+Você cria uma nova tarefa e define o gatilho (ex: mensalmente).
+
+Na ação, você manda ele executar o programa Rscript.exe (que fica na pasta bin do seu R) e passa o caminho do seu atualizador_caged.R como argumento.
+
+Se o Servidor for Linux (Shiny Server gratuito ou VM):
+Você usará o Cron Job.
+
+Basta abrir o terminal e digitar crontab -e.
+
+Adicionar uma linha como: 0 2 15 * * Rscript /caminho/para/atualizador_caged.R (Isso rodaria todo dia 15 às 2:00 da manhã).
+
+Se for na Nuvem (Shinyapps.io, GitHub, AWS):
+Se o seu Shiny for hospedado no shinyapps.io, você não tem um servidor próprio para rodar tarefas agendadas lá. Nesse caso, a abordagem mais moderna é usar o GitHub Actions. Você cria um arquivo de configuração no GitHub que liga uma máquina virtual todo mês, roda o seu atualizador_caged.R, gera o Parquet e faz o deploy automático da nova base para o seu Shiny.
+
+O Próximo Passo
+Com essas funções prontas, a sua parte de extração de dados está resolvida de ponta a ponta.
+
+Onde você pretende hospedar este aplicativo Shiny (ex: servidor próprio da SEFAZ, uma máquina Windows local, ou na nuvem pelo Shinyapps.io)? Dependendo de onde for, posso te guiar exatamente em como configurar esse "robô" agendador!
