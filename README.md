@@ -22,7 +22,7 @@ Projetado originalmente para suprir as demandas rigorosas de análise econômica
 
 ## 🚀 Vantagens e Melhorias na Arquitetura
 
-A consolidação das rotinas de extração no ecossistema do pacote **`NCAGEDdataR`** traz avanços significativos para a engenharia de dados:
+A consolidação das rotinas de extração no ecossistema do pacote **`NCAGEDdataR`** traz avanços significativos em relação a versão anterior do pacote:
 
 * **Eficiência de API (Zero Desperdício):** A lógica de download investiga apenas o ano e a competência de interesse, reduzindo drasticamente o tempo de conexão e o risco de bloqueios por excesso de requisições na API do Google Drive.
 * **Arquitetura DRY (Don't Repeat Yourself):** O motor de limpeza processa de forma padronizada as variações estruturais das planilhas. Regras de cabeçalho complexas utilizam funções internas, garantindo que alterações no layout oficial do Ministério do Trabalho sejam replicadas e tratadas automaticamente em todas as 11 tabelas.

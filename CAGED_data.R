@@ -303,18 +303,18 @@ CAGED <- function(ref = "last",
 
 
 # --- EXEMPLOS DE USO ----
-download_caged("last")
-processar_caged(usar_temporario = TRUE)
-base_fiscal <- CAGED() 
-
-
-
-Tab7 <- base_fiscal %>% 
-  filter(Tabela_Origem == "Tabela 7") %>% 
-  collect()
-
-
-base_municipios <- CAGED(
-  parquet_individual = TRUE, 
-  arquivo_alvo = "dados_caged_parquet/CAGED_Tabela_3_ATUAL.parquet"
-)
+# download_caged("last")
+# processar_caged(usar_temporario = TRUE)
+# base_fiscal <- CAGED() 
+# 
+# 
+# 
+# Tab7 <- base_fiscal %>% 
+#   filter(Tabela_Origem == "Tabela 7") %>% 
+#   collect()
+# 
+# 
+# base_municipios <- CAGED(
+#   parquet_individual = TRUE, 
+#   arquivo_alvo = "dados_caged_parquet/CAGED_Tabela_3_ATUAL.parquet"
+# )
